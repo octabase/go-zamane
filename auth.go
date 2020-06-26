@@ -33,7 +33,11 @@ type AuthToken struct {
 var ErrInvalidAuthentication = errors.New("authentication token is not valid")
 
 const (
-	maxKDIter = 8192
+	kamusmKDIter = 100
+	minKDIter    = kamusmKDIter
+	maxKDIter    = 1 << 17 // took around 100 ms on commodity hardware
+	minSaltLen   = 8       // it is defined in the RFC2898
+	maxWireLen   = 10 * ((aes.BlockSize * 2) + minSaltLen + 8)
 )
 
 // NewAuthToken ...
@@ -45,11 +49,12 @@ func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password 
 		return nil, err
 	}
 
-	iter := 100
-
 	payload := sha1.Sum([]byte(strconv.Itoa(customerID) + strconv.Itoa(epoch)))
 
+	iter := kamusmKDIter
+
 	key := pbkdf2.Key([]byte(password), salt, iter, 32, sha256.New)
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -79,6 +84,11 @@ func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password 
 func (r *AuthToken) Verify(rand io.Reader, timestamp time.Time, password string) error {
 	epoch := int(timestamp.UnixNano() / int64(time.Millisecond))
 
+	if r.IterationCount < minKDIter {
+		return errors.New("insufficient iteration to derive cipher key")
+	}
+
+	// take care of denial-of-service attacks
 	if r.IterationCount > maxKDIter {
 		return errors.New("exceeds the maximum number of iteration")
 	}
@@ -91,6 +101,10 @@ func (r *AuthToken) Verify(rand io.Reader, timestamp time.Time, password string)
 
 	if len(r.IV) != block.BlockSize() {
 		return errors.New("illegal value of the initial vector")
+	}
+
+	if len(r.Salt) < minSaltLen {
+		return errors.New("insufficient amount of salt")
 	}
 
 	payload := make([]byte, paddedLen(len(r.Ciphertext), block.BlockSize()))
@@ -154,12 +168,16 @@ func (r *AuthToken) MarshalASN1() ([]byte, error) {
 func (r *AuthToken) UnmarshalASN1(data []byte) (err error) {
 	var raw asn1.RawValue
 
+	if len(data) > maxWireLen {
+		return errors.New("asn.1 input is too long")
+	}
+
 	if _, err = asn1.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 
 	if raw.Tag != asn1.TagSequence {
-		return errors.New("malformed request")
+		return errors.New("asn.1 input is must be sequence")
 	}
 
 	if data, err = asn1.Unmarshal(raw.Bytes, &r.UserID); err != nil {
