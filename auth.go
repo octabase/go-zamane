@@ -32,6 +32,10 @@ type AuthToken struct {
 // ErrInvalidAuthentication indicates the auth token is can not be authorized
 var ErrInvalidAuthentication = errors.New("authentication token is not valid")
 
+const (
+	maxKDIter = 8192
+)
+
 // NewAuthToken ...
 func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password string) (*AuthToken, error) {
 	epoch := int(timestamp.UnixNano() / int64(time.Millisecond))
@@ -75,10 +79,18 @@ func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password 
 func (r *AuthToken) Verify(rand io.Reader, timestamp time.Time, password string) error {
 	epoch := int(timestamp.UnixNano() / int64(time.Millisecond))
 
+	if r.IterationCount > maxKDIter {
+		return errors.New("exceeds the maximum number of iteration")
+	}
+
 	key := pbkdf2.Key([]byte(password), r.Salt, r.IterationCount, 32, sha256.New)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return err
+	}
+
+	if len(r.IV) != block.BlockSize() {
+		return errors.New("illegal value of the initial vector")
 	}
 
 	payload := make([]byte, paddedLen(len(r.Ciphertext), block.BlockSize()))
