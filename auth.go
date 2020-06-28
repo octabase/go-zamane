@@ -22,40 +22,45 @@ type AuthToken struct {
 	Salt           []byte // a cryptorandom value to derive AES key
 	IterationCount int    // PBKDF2 iteration count
 	IV             []byte // initial vector to encrypt the payload
-	Ciphertext     []byte // it's equal to aes256cbc(padding(sha1(str(customerNumber) + str(epochInMillis))))
+	Ciphertext     []byte // encrypted payload that must be part of the request
 }
 
-// ErrInvalidAuthentication indicates the auth token is can not be authorized
+// ErrInvalidAuthentication indicates the auth token is can not be authorized.
 var ErrInvalidAuthentication = errors.New("authentication token is not valid")
 
 const (
-	kamusmKDIter = 100
-	minKDIter    = kamusmKDIter
-	maxKDIter    = 1 << 17 // took around 100 ms on commodity hardware
-	minSaltLen   = 8       // it is defined in the RFC2898
+	kamusmKDIter = 100          // this value is used by the tss client of KamuSM
+	minKDIter    = kamusmKDIter //
+	maxKDIter    = 1 << 17      // took around 100 ms on commodity hardware
+	minSaltLen   = 8            // it is defined in the RFC2898
 
 	maxSaltLen       = 1 << 8
 	maxCiphertextLen = 512/8 + aes.BlockSize                                      // max payload is the same as padded output length of SHA-512
 	maxWireLen       = 16 + 4 + maxSaltLen + 4 + aes.BlockSize + maxCiphertextLen // asn1enc+uid+salt+iter+iv+ciphertext
 )
 
-// NewAuthToken ...
+// NewAuthToken builds a token to prove that client knows the user credentials.
+// AuthToken has also the binding property with the payload which can be a part of the request.
 func NewAuthToken(rand io.Reader, customerID int, password string, payload []byte) (*AuthToken, error) {
-	salt := make([]byte, 8)
+	// KamuSM's tss client uses 8-byte salt, but we prefer a more reasonable
+	// value instead, same as the block size of the hash will use.
+	salt := make([]byte, 256/8)
 	if _, err := io.ReadFull(rand, salt); err != nil {
 		return nil, err
 	}
 
-	iter := kamusmKDIter
+	// use a reasonable value to iterate.
+	iter := maxKDIter / 4
 
-	key := pbkdf2.Key([]byte(password), salt, iter, 32, sha256.New)
+	// derive an AES-256 key by the user password to encrypt the payload.
+	key := pbkdf2.Key([]byte(password), salt, iter, 256/8, sha256.New)
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
 
-	initVector := make([]byte, 16)
+	initVector := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(rand, initVector); err != nil {
 		return nil, err
 	}
@@ -207,6 +212,9 @@ func (r *AuthToken) UnmarshalASN1(data []byte) (err error) {
 	return nil
 }
 
+// following padding algorithm is compatible with PKCS#5 and PKCS#7.
+// if the len is equal to blocksize it returns len+blocksize to
+// distinguish padded bytes.
 func paddedLen(len, blockSize int) int {
 	return len + blockSize - len%blockSize
 }
