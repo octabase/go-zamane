@@ -7,23 +7,19 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/asn1"
 	"errors"
 	"io"
-	"strconv"
-	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// AuthToken is used to authenticate requests to Zamane servers,
-// includes a mechanism to prevent replay attacks.
+// AuthToken is used to authenticate requests to Zamane servers.
 type AuthToken struct {
 	UserID         int    // customer number used in KamuSM
-	Salt           []byte // an 8-byte cryptorandom value to derive AES key
+	Salt           []byte // a cryptorandom value to derive AES key
 	IterationCount int    // PBKDF2 iteration count
 	IV             []byte // initial vector to encrypt the payload
 	Ciphertext     []byte // it's equal to aes256cbc(padding(sha1(str(customerNumber) + str(epochInMillis))))
@@ -37,19 +33,18 @@ const (
 	minKDIter    = kamusmKDIter
 	maxKDIter    = 1 << 17 // took around 100 ms on commodity hardware
 	minSaltLen   = 8       // it is defined in the RFC2898
-	maxWireLen   = 10 * ((aes.BlockSize * 2) + minSaltLen + 8)
+
+	maxSaltLen       = 1 << 8
+	maxCiphertextLen = 512/8 + aes.BlockSize                                      // max payload is the same as padded output length of SHA-512
+	maxWireLen       = 16 + 4 + maxSaltLen + 4 + aes.BlockSize + maxCiphertextLen // asn1enc+uid+salt+iter+iv+ciphertext
 )
 
 // NewAuthToken ...
-func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password string) (*AuthToken, error) {
-	epoch := int(timestamp.UnixNano() / int64(time.Millisecond))
-
+func NewAuthToken(rand io.Reader, customerID int, password string, payload []byte) (*AuthToken, error) {
 	salt := make([]byte, 8)
 	if _, err := io.ReadFull(rand, salt); err != nil {
 		return nil, err
 	}
-
-	payload := sha1.Sum([]byte(strconv.Itoa(customerID) + strconv.Itoa(epoch)))
 
 	iter := kamusmKDIter
 
@@ -81,16 +76,18 @@ func NewAuthToken(rand io.Reader, timestamp time.Time, customerID int, password 
 }
 
 // Verify checks authentication of the token with the given password and timestamp.
-func (r *AuthToken) Verify(rand io.Reader, timestamp time.Time, password string) error {
-	epoch := int(timestamp.UnixNano() / int64(time.Millisecond))
-
+func (r *AuthToken) Verify(rand io.Reader, password string, payload []byte) error {
 	if r.IterationCount < minKDIter {
 		return errors.New("insufficient iteration to derive cipher key")
 	}
 
-	// take care of denial-of-service attacks
+	// too many iterations can allow denial-of-service attacks
 	if r.IterationCount > maxKDIter {
 		return errors.New("exceeds the maximum number of iteration")
+	}
+
+	if len(r.Salt) > maxSaltLen {
+		return errors.New("salt value is too long")
 	}
 
 	key := pbkdf2.Key([]byte(password), r.Salt, r.IterationCount, 32, sha256.New)
@@ -107,15 +104,22 @@ func (r *AuthToken) Verify(rand io.Reader, timestamp time.Time, password string)
 		return errors.New("insufficient amount of salt")
 	}
 
-	payload := make([]byte, paddedLen(len(r.Ciphertext), block.BlockSize()))
+	if len(r.Ciphertext) > maxCiphertextLen {
+		return errors.New("ciphertext value is too long")
+	}
+
+	if len(r.Ciphertext)%aes.BlockSize != 0 {
+		return errors.New("malformed ciphertext value")
+	}
+
+	cleartext := make([]byte, paddedLen(len(r.Ciphertext), block.BlockSize()))
 
 	cbc := cipher.NewCBCDecrypter(block, r.IV)
-	cbc.CryptBlocks(payload, r.Ciphertext)
+	cbc.CryptBlocks(cleartext, r.Ciphertext)
 
-	tmp := sha1.Sum([]byte(strconv.Itoa(r.UserID) + strconv.Itoa(epoch)))
-	expectedPayload := padded(tmp[:], block.BlockSize())
+	expectedPayload := padded(payload[:], block.BlockSize())
 
-	if ok := 1 == subtle.ConstantTimeCompare(expectedPayload, payload); !ok {
+	if ok := 1 == subtle.ConstantTimeCompare(expectedPayload, cleartext); !ok {
 		return ErrInvalidAuthentication
 	}
 
@@ -204,12 +208,7 @@ func (r *AuthToken) UnmarshalASN1(data []byte) (err error) {
 }
 
 func paddedLen(len, blockSize int) int {
-	m := len % blockSize
-	if m == 0 {
-		return len
-	}
-
-	return len + blockSize - m
+	return len + blockSize - len%blockSize
 }
 
 func padded(input []byte, blockSize int) []byte {
