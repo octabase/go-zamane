@@ -80,7 +80,7 @@ func NewAuthToken(rand io.Reader, customerID int, password string, payload []byt
 	}, nil
 }
 
-// Verify checks authentication of the token with the given password and timestamp.
+// Verify checks authentication of the token with the given password and payload.
 func (r *AuthToken) Verify(rand io.Reader, password string, payload []byte) error {
 	if r.IterationCount < minKDIter {
 		return errors.New("insufficient iteration to derive cipher key")

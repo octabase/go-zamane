@@ -6,6 +6,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/octabase/go-rfc3161 v0.0.0-20200627191201-0368c0dcb637 h1:soUAlfU0nDGBxKoZO7MXbHjxrPzkStceB7PuRz9+PXQ=
 github.com/octabase/go-rfc3161 v0.0.0-20200627191201-0368c0dcb637/go.mod h1:l9XY3jMZBxKHsavuXhNFtP7CIdDZnRXg9/jHcgW2jws=
+github.com/octabase/go-rfc3161 v0.0.0-20200628130304-c95548f94760 h1:pa17ZZK9RzUCDl7WGysG1Nq4fAANQLufeqAUT23hNiE=
+github.com/octabase/go-rfc3161 v0.0.0-20200628130304-c95548f94760/go.mod h1:l9XY3jMZBxKHsavuXhNFtP7CIdDZnRXg9/jHcgW2jws=
 github.com/phayes/cryptoid v0.0.0-20160503233126-981f0b34ea99 h1:tBXA/x8D3f61TOvO80P2LFjwIJ7AYVAgcyxkWqMxWkc=
 github.com/phayes/cryptoid v0.0.0-20160503233126-981f0b34ea99/go.mod h1:v+QDq7pUBXQy29R86Agi+SianQobS5uQHKLu0CZvvkc=
 go.mozilla.org/pkcs7 v0.0.0-20200128120323-432b2356ecb1 h1:A/5uWzF44DlIgdm/PQFwfMkW0JX+cIcQi/SwLAmZP5M=

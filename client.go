@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2020 Octabase Blockchain Labs.
 
+// Package zamane is a client library to get signed timestamps from the timestamp server
+// operated by KamuSM. It also provides extra functionality to verify timestamps and query
+// the amount of credit remaining.
 package zamane
 
 import (
@@ -21,35 +24,46 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/octabase/go-rfc3161"
 	"github.com/phayes/cryptoid"
 )
 
-// ...
 const (
+	// DefaultServerURL is the address of the timestamp server operated in
+	// production by KamuSM.
 	DefaultServerURL = "http://zd.kamusm.gov.tr"
 
 	clientUA        = "go-zamane/1"
 	maxResponseSize = 1 << 16
 )
 
+// it is defined in http://kamusm.bilgem.tubitak.gov.tr/depo/nesne_belirtec_listesi
 var oidKamuSMZDPrincipal1 = asn1.ObjectIdentifier{2, 16, 792, 1, 2, 1, 1, 5, 7, 3, 1}
 
-// ClientOption ...
+// ClientOption is implemented by Client options. They can be used to customize
+// the client behavior. See functions prefixed by With... for available options.
 type ClientOption func(*Client) error
 
-// Client ...
+// HTTPDoer is an interface for the one method of http.Client that is used by Client
+type HTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+// Client provides an interface to access functionalities providing by the KamuSM's
+// timestamp server.
 type Client struct {
 	customerID int
 	password   string
-	client     *http.Client
+	client     HTTPDoer
 	serverURL  string
 	rnd        io.Reader
 }
 
-// NewClient ...
+// NewClient creates a Client instance with the credentials issued by KamuSM to be
+// used for authentication. It can be customized with options e.g., to use a proxy.
 func NewClient(customerID, password string, options ...ClientOption) (*Client, error) {
 	opts := []ClientOption{
 		WithServerURL(DefaultServerURL),
@@ -69,6 +83,7 @@ func NewClient(customerID, password string, options ...ClientOption) (*Client, e
 		password:   password,
 	}
 
+	// apply options given by the user
 	for _, o := range opts {
 		if err := o(c); err != nil {
 			return nil, err
@@ -78,7 +93,20 @@ func NewClient(customerID, password string, options ...ClientOption) (*Client, e
 	return c, nil
 }
 
-// RemainingCredit ...
+// RemainingCredit returns the available amount of credit remaining for the authenticated user
+// on the KamuSM's timestamp server. Note that the spend of credits is processed asynchronously
+// by the server with a delay. Therefore, after spending the credits, it may be necessary to
+// wait a bit to check the remaining credits.
+//
+// RemainingCredit also uses the system time to authenticate to the server. It means the system
+// date and time must be synchronized with time servers, i.e., using NTP. KamuSM servers allow
+// clock drift up to 10 minutes.
+//
+// Example usage:
+//  client, _ := zamane.NewClient("999999", "12345678")
+//  credit, _ := client.RemainingCredit(nil)
+//
+//  fmt.Printf("Remaining credit: %d\n", credit)
 func (c *Client) RemainingCredit(ctx context.Context) (int, error) {
 	reqTime := int(time.Now().UnixNano() / int64(time.Millisecond))
 
@@ -116,11 +144,12 @@ func (c *Client) RemainingCredit(ctx context.Context) (int, error) {
 
 	defer resp.Body.Close()
 
+	// don't read all the response if it exceeds maxResponseSize
 	res := io.LimitReader(resp.Body, maxResponseSize)
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := ioutil.ReadAll(res)
-		return 0, fmt.Errorf("zamane server error: %s: `%s`", resp.Status, string(raw))
+		return 0, fmt.Errorf("server error: %s: `%s`", resp.Status, string(raw))
 	}
 
 	raw, err := ioutil.ReadAll(res)
@@ -128,7 +157,8 @@ func (c *Client) RemainingCredit(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	credit, err := strconv.ParseInt(string(raw), 10, 64)
+	// expected response is a number as a string that indicating the amount of credit remaining
+	credit, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil {
 		return 0, err
 	}
@@ -136,7 +166,36 @@ func (c *Client) RemainingCredit(ctx context.Context) (int, error) {
 	return int(credit), nil
 }
 
-// RequestTimestamp ...
+// RequestTimestamp makes a request to the server to get signed timestamp for the given
+// hash sum and algorithm. If successful, it returns the request and its response.
+//
+// It is recommended that both be kept next to the digested file or data for future verifications.
+// Both can be serialized in ASN.1 encoding, and revert.
+//
+// RequestTimestamp also verifies the response given by the timestamp server. The signature is verified
+// with the certificate in the response, and that certificate is also verified by the KamuSM root certificates.
+// It also considers intermediate certificates if the server provides.
+//
+// Warning: This function doesn't check the certificate revocation list provided by KamuSM. Note that all of the
+// root certificates are defined statically in file kamusm_ca.go. It can be checked if they are identical with
+// certificates provided by KamuSM site https://sertifikalar.kamusm.gov.tr
+//
+// Example usage:
+//  algo := cryptoid.SHA512
+//  digester := algo.Hash.New()
+//
+//  file, _ := os.Open("file-to-be-timestamped.txt")
+//  io.Copy(digester, file)
+//
+//  client, _ := zamane.NewClient("999999", "12345678")
+//
+//  tsq, tsr, _ := client.RequestTimestamp(nil, digester.Sum(nil), algo)
+//
+//  tsqDER, _ := asn1.Marshal(*tsq)
+//  tsrDER, _ := asn1.Marshal(*tsr)
+//
+//  ioutil.WriteFile("file-to-be-timestamped.tsq", tsqDER, 0644)
+//  ioutil.WriteFile("file-to-be-timestamped.tsr", tsrDER, 0644)
 func (c *Client) RequestTimestamp(ctx context.Context, sum []byte, algo cryptoid.HashAlgorithm) (tsq *rfc3161.TimeStampReq, tsr *rfc3161.TimeStampResp, err error) {
 	tsq, err = newTSQ(c.rnd, sum, algo)
 	if err != nil {
@@ -178,6 +237,7 @@ func (c *Client) RequestTimestamp(ctx context.Context, sum []byte, algo cryptoid
 
 	defer resp.Body.Close()
 
+	// don't read all the response if it exceeds maxResponseSize
 	res := io.LimitReader(resp.Body, maxResponseSize)
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -202,6 +262,7 @@ func (c *Client) RequestTimestamp(ctx context.Context, sum []byte, algo cryptoid
 		return nil, nil, errors.New(tsr.Status.Error())
 	}
 
+	// verify with PKI
 	if err = tsr.Verify(tsq, nil); err != nil {
 		return nil, nil, err
 	}
@@ -209,8 +270,8 @@ func (c *Client) RequestTimestamp(ctx context.Context, sum []byte, algo cryptoid
 	return tsq, tsr, nil
 }
 
-// WithHTTPClient ...
-func WithHTTPClient(client *http.Client) ClientOption {
+// WithHTTPClient returns an option to be used the given HTTP client for the requests.
+func WithHTTPClient(client HTTPDoer) ClientOption {
 	return func(c *Client) error {
 		c.client = client
 
@@ -218,7 +279,7 @@ func WithHTTPClient(client *http.Client) ClientOption {
 	}
 }
 
-// WithServerURL ...
+// WithServerURL returns an option to be used the given timestamp server URL for the requests.
 func WithServerURL(serverURL string) ClientOption {
 	return func(c *Client) error {
 		u, err := url.Parse(serverURL)
@@ -232,7 +293,8 @@ func WithServerURL(serverURL string) ClientOption {
 	}
 }
 
-// WithRandomSource ...
+// WithRandomSource returns an option to be used the given random source for generating random numbers.
+// It must be a cryptographically secure random source.
 func WithRandomSource(rnd io.Reader) ClientOption {
 	return func(c *Client) error {
 		c.rnd = rnd
@@ -241,6 +303,7 @@ func WithRandomSource(rnd io.Reader) ClientOption {
 	}
 }
 
+// AFAIK, only SHA-256 and SHA-512 are supported by KamuSM server.
 func newTSQ(rand io.Reader, sum []byte, algo cryptoid.HashAlgorithm) (*rfc3161.TimeStampReq, error) {
 	nonce := make([]byte, 160/8)
 	if _, err := io.ReadFull(rand, nonce); err != nil {
@@ -261,6 +324,7 @@ func newTSQ(rand io.Reader, sum []byte, algo cryptoid.HashAlgorithm) (*rfc3161.T
 	}, nil
 }
 
+// load KamuSM root certificates to verify the signature's certs and intermediates.
 func init() {
 	rfc3161.RootCerts = x509.NewCertPool()
 
