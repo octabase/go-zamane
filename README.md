@@ -1,6 +1,9 @@
 # go-zamane
 WIP
 
+[![Godoc](http://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://pkg.go.dev/github.com/octabase/go-zamane?tab=doc)
+[![license](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat)](https://raw.githubusercontent.com/octabase/go-zamane/master/LICENSE)
+
 *Getting a signed timestamp:*
 ```go
 algo := cryptoid.SHA512
